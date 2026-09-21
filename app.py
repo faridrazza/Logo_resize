@@ -11,8 +11,9 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description=(
-        "Resizes any logo (square or horizontal) to "
-        f"{settings.TARGET_SIZE}x{settings.TARGET_SIZE} px without changing the artwork."
+        "Pads any logo (square, horizontal or vertical) onto a square background "
+        f"between {settings.EDGE_MIN} and {settings.EDGE_MAX} px. The logo itself is "
+        "never cropped, stretched or enlarged."
     ),
 )
 
@@ -35,6 +36,7 @@ def root():
         "docs": "/docs",
         "endpoints": [
             f"{settings.API_PREFIX}/logo/health",
+            f"{settings.API_PREFIX}/logo/square",
             f"{settings.API_PREFIX}/logo/resize",
             f"{settings.API_PREFIX}/logo/batch",
         ],

@@ -44,15 +44,27 @@ class Settings:
     API_PREFIX = _str("API_PREFIX", "/api/v1")
     CORS_ORIGINS = [o.strip() for o in _str("CORS_ORIGINS", "*").split(",") if o.strip()]
 
-    # --- output geometry ---
-    TARGET_SIZE = _int("TARGET_SIZE", 300)
-    # auto | transparent | white  -> how the padding around the logo is filled
-    OUTPUT_BACKGROUND = _str("OUTPUT_BACKGROUND", "auto").lower()
-    ALLOW_UPSCALE = _bool("ALLOW_UPSCALE", True)
+    # --- output geometry: Logo Squaring Rules, 2026-09-19 ---
+    # The square's edge is derived per logo, never fixed:
+    #   EDGE = clamp(max(width, height), EDGE_MIN, EDGE_MAX)
+    # EDGE_MIN is Google's floor for the *image*; a logo smaller than that is
+    # centred on a 128 canvas rather than refused or enlarged. EDGE_MAX is the
+    # size Google recommends; nothing above it helps.
+    EDGE_MIN = _int("EDGE_MIN", 128)
+    EDGE_MAX = _int("EDGE_MAX", 1200)
+    # "Square to within about 5 percent, not to the pixel" - a 1000x1010 logo is
+    # square for our purposes and must not be pushed down the horizontal path.
+    SQUARE_TOLERANCE = _float("SQUARE_TOLERANCE", 0.05)
+    # The two background colours in use. No brand-colour matching: guessing a
+    # brand's own colour and getting it slightly wrong looks worse than white.
+    BG_LIGHT = _str("BG_LIGHT", "#ffffff")
+    BG_DARK = _str("BG_DARK", "#0d0d0d")
+    # Google's file ceiling for the logo asset.
+    MAX_OUTPUT_MB = _float("MAX_OUTPUT_MB", 5.0)
+    MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 25)
     # Trim a uniform border before fitting. OFF by default: never touch framing.
     TRIM_BORDER = _bool("TRIM_BORDER", False)
     TRIM_TOLERANCE = _int("TRIM_TOLERANCE", 8)
-    MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 25)
 
     # --- processing mode: exact | ai | hybrid ---
     DEFAULT_MODE = _str("DEFAULT_MODE", "hybrid").lower()
@@ -64,9 +76,17 @@ class Settings:
     IMAGE_WORK_SIZE = _str("IMAGE_WORK_SIZE", "1024x1024")
     IMAGE_QUALITY = _str("IMAGE_QUALITY", "high")
     IMAGE_INPUT_FIDELITY = _str("IMAGE_INPUT_FIDELITY", "high")
-    REQUEST_TIMEOUT = _float("REQUEST_TIMEOUT", 180.0)
+    # The contract allows the renderer 30 seconds; past that it is treated as
+    # upstream_unreachable_or_timeout and the logo is squared in-house.
+    UPSTREAM_TIMEOUT = _float("UPSTREAM_TIMEOUT", 30.0)
+    # Plain downloads are not the upstream renderer and keep their own budget.
+    REQUEST_TIMEOUT = _float("REQUEST_TIMEOUT", 45.0)
     MODEL_MAX_RETRIES = _int("MODEL_MAX_RETRIES", 3)
     PROMPT_FILE = BASE_DIR / _str("PROMPT_FILE", "prompt.txt")
+    # Paste the source artwork back over its own rectangle after the model has
+    # rendered the square. The artwork is then the source, pixel for pixel, and
+    # "no changes to the logo" is a property of the code rather than a hope.
+    COMPOSITE_SOURCE = _bool("COMPOSITE_SOURCE", True)
 
     # --- fidelity gate (hybrid falls back to the exact result when these fail) ---
     VERIFY_PHASH_MAX = _int("VERIFY_PHASH_MAX", 6)

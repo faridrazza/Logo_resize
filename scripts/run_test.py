@@ -107,7 +107,7 @@ def colour_survival(src: Image.Image, out: Image.Image):
     return round(worst, 1), per
 
 
-def framing(src: Image.Image, out: Image.Image, bg):
+def framing(src: Image.Image, out: Image.Image, bg, edge: int):
     """Was the artwork scaled by one uniform factor and left uncropped?"""
     sb, ob = content_box(src, bg), content_box(out, bg)
     if not sb or not ob:
@@ -115,11 +115,11 @@ def framing(src: Image.Image, out: Image.Image, bg):
     sw, sh = sb[2] - sb[0] + 1, sb[3] - sb[1] + 1
     ow, oh = ob[2] - ob[0] + 1, ob[3] - ob[1] + 1
     src_ar, out_ar = sw / sh, ow / oh
-    off_x = (ob[0] + ob[2] + 1) / 2 - settings.TARGET_SIZE / 2
-    off_y = (ob[1] + ob[3] + 1) / 2 - settings.TARGET_SIZE / 2
+    off_x = (ob[0] + ob[2] + 1) / 2 - edge / 2
+    off_y = (ob[1] + ob[3] + 1) / 2 - edge / 2
 
-    # Where an undistorted resize must put the artwork: one scale factor, both axes.
-    scale = min(settings.TARGET_SIZE / src.size[0], settings.TARGET_SIZE / src.size[1])
+    # Where the sizing rule must put the artwork: one scale factor, capped at 1.0.
+    scale = service.artwork_scale(src.size[0], src.size[1], edge)
     ew, eh = sw * scale, sh * scale
     return {
         "source_content": [sw, sh],
@@ -130,31 +130,72 @@ def framing(src: Image.Image, out: Image.Image, bg):
         "output_ar": round(out_ar, 4),
         "ar_error_pct": round(abs(src_ar - out_ar) / src_ar * 100, 2),
         "centre_offset_px": [round(off_x, 1), round(off_y, 1)],
-        "touches_edge": ow >= settings.TARGET_SIZE or oh >= settings.TARGET_SIZE,
+        "touches_edge": ow >= edge or oh >= edge,
     }
 
 
-def uniform_scale_max_diff(src: Image.Image, out: Image.Image, bg) -> int:
+def uniform_scale_max_diff(src: Image.Image, out: Image.Image, bg, edge: int) -> int:
     """Strictest possible check on the deterministic path.
 
-    Rebuilds the expected result here, independently of service.fit_to_square:
+    Rebuilds the expected result here, independently of service.square_canvas:
     one scale factor for both axes, centred on the canvas. Returns the largest
     per-channel difference against the shipped file. 0 means the output is that
     operation and nothing else — no stretch, no crop, no redraw. A stretched or
     cropped render could not score 0, so this is a real check, not a restatement.
     """
-    size = settings.TARGET_SIZE
-    w, h = src.size
-    scale = min(size / w, size / h)
-    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-    expected = Image.new("RGBA", (size, size), (0, 0, 0, 0) if bg is None else bg + (255,))
+    size = edge
+    left, top, nw, nh = service.artwork_box(src.size[0], src.size[1], size)
+    expected = Image.new("RGBA", (size, size), service.hex_to_rgb(bg) + (255,))
     art = src.resize((nw, nh), Image.LANCZOS).convert("RGBA")
-    expected.paste(art, ((size - nw) // 2, (size - nh) // 2), art)
+    expected.alpha_composite(art, (left, top))
+    expected = expected.convert("RGB")
     a = np.asarray(expected, dtype=np.int16)
-    b = np.asarray(out.convert("RGBA"), dtype=np.int16)
+    b = np.asarray(out.convert("RGB"), dtype=np.int16)
     if a.shape != b.shape:
         return 255
     return int(np.abs(a - b).max())
+
+
+def artwork_max_diff(src: Image.Image, out: Image.Image, edge: int, bg_hex: str) -> int:
+    """Largest channel difference inside the artwork rectangle.
+
+    Compares the shipped file's artwork area against the source scaled by exactly
+    the factor STEP 5 allows. 0 means the artwork in the output IS the source, so
+    nothing was redrawn, re-typeset or re-coloured - the claim "no changes to the
+    logo" is then a measurement rather than an opinion.
+    """
+    left, top, nw, nh = service.artwork_box(src.size[0], src.size[1], edge)
+    art = src.resize((nw, nh), Image.LANCZOS).convert("RGBA")
+    # Flatten onto the plate that was actually used, not onto white: an
+    # anti-aliased edge pixel blended against near-black is a different colour
+    # from the same pixel blended against white, and comparing the two would
+    # report a difference that is not there.
+    want = Image.new("RGBA", (nw, nh), service.hex_to_rgb(bg_hex) + (255,))
+    want.alpha_composite(art)
+    got = out.convert("RGB").crop((left, top, left + nw, top + nh))
+    a = np.asarray(want.convert("RGB"), dtype=np.int16)
+    b = np.asarray(got, dtype=np.int16)
+    if a.shape != b.shape:
+        return 255
+    return int(np.abs(a - b).max())
+
+
+def plate_max_deviation(out: Image.Image, src: Image.Image, edge: int, bg_hex: str) -> int:
+    """How far the padding strays from the flat colour that was asked for.
+
+    The rules want the square created "in the chosen colour" - one uniform plate
+    with nothing on it. This measures the worst channel deviation anywhere
+    outside the artwork rectangle, so an invented gradient, tint or vignette
+    shows up as a number instead of going unnoticed.
+    """
+    left, top, nw, nh = service.artwork_box(src.size[0], src.size[1], edge)
+    a = np.asarray(out.convert("RGB"), dtype=np.int16)
+    want = np.array(service.hex_to_rgb(bg_hex), dtype=np.int16)
+    mask = np.ones(a.shape[:2], dtype=bool)
+    mask[top:top + nh, left:left + nw] = False
+    if not mask.any():
+        return 0
+    return int(np.abs(a[mask] - want).max())
 
 
 def png_bytes(im: Image.Image) -> bytes:
@@ -173,19 +214,23 @@ def run_one(idx: int, path: Path, url: str, reuse: bool = False, label: str = ""
     """
     row: dict = {"no": idx, "file": path.name, "url": url, "label": label}
     src = service.open_image(path.read_bytes())
-    bg = service.detect_background(src)
+    edge = service.compute_edge(*src.size)
+    bg, bg_reason = service.choose_background(src, url or path.name)
     row["source"] = {
         "width": src.size[0], "height": src.size[1],
         "format": (src.format or "PNG").upper(),
         "aspect_type": service.classify_aspect(*src.size),
         "aspect_ratio": round(src.size[0] / src.size[1], 3),
-        "background": "transparent" if bg is None else f"rgb{bg}",
+        "transparent": service.has_transparency(src),
+        "edge": edge,
+        "background": bg,
+        "background_reason": bg_reason,
         "bytes": path.stat().st_size,
     }
 
     # ---- deterministic path
     t0 = time.perf_counter()
-    exact = service.render_exact(src, settings.TARGET_SIZE, bg)
+    exact = service.render_square(src, edge, bg)
     exact_ms = round((time.perf_counter() - t0) * 1000, 1)
     (EXACT_DIR / f"{path.stem}.png").write_bytes(png_bytes(exact))
 
@@ -195,12 +240,13 @@ def run_one(idx: int, path: Path, url: str, reuse: bool = False, label: str = ""
         "size": list(exact.size),
         "bytes": len(png_bytes(exact)),
         "elapsed_ms": exact_ms,
-        "framing": framing(src, exact, bg),
+        "framing": framing(src, exact, service.hex_to_rgb(bg), edge),
         "colour_worst_delta": worst,
         "colour_detail": per,
-        "scale_factor": round(min(settings.TARGET_SIZE / src.size[0],
-                                  settings.TARGET_SIZE / src.size[1]), 4),
-        "uniform_scale_max_diff": uniform_scale_max_diff(src, exact, bg),
+        "scale_factor": round(service.artwork_scale(*src.size, edge), 4),
+        "uniform_scale_max_diff": uniform_scale_max_diff(src, exact, bg, edge),
+        "artwork_max_diff": artwork_max_diff(src, exact, edge, bg),
+        "plate_max_deviation": plate_max_deviation(exact, src, edge, bg),
     }
 
     # ---- model path
@@ -212,15 +258,20 @@ def run_one(idx: int, path: Path, url: str, reuse: bool = False, label: str = ""
         if reuse:
             if not cached.exists():
                 raise FileNotFoundError(f"no cached model render for {path.name}")
-            model = Image.open(cached).convert("RGBA")
+            model = Image.open(cached).convert("RGB")
             model_ms = PREVIOUS_MS.get(path.name, 0.0)
+            rejected = None
         else:
-            raw = service.render_ai(src, bg, {
+            render = service.render_ai(src, edge, bg, {
                 "source_width": src.size[0], "source_height": src.size[1],
                 "aspect_type": row["source"]["aspect_type"],
             })
-            model = service.fit_to_square(raw, settings.TARGET_SIZE, bg, True)
+            service.validate_square(render, edge, png_bytes(render))
+            row.setdefault("model_raw", {})["before_composite"] =                 compare(exact, render)
+            model = (service.composite_source(render, src, edge, bg)
+                     if settings.COMPOSITE_SOURCE else render)
             model_ms = round((time.perf_counter() - t0) * 1000, 1)
+            rejected = None
         (MODEL_DIR / f"{path.stem}.png").write_bytes(png_bytes(model))
         m_worst, m_per = colour_survival(src, model)
         row["model"] = {
@@ -228,14 +279,20 @@ def run_one(idx: int, path: Path, url: str, reuse: bool = False, label: str = ""
             "size": list(model.size),
             "bytes": len(png_bytes(model)),
             "elapsed_ms": model_ms,
-            "framing": framing(src, model, bg),
+            "framing": framing(src, model, service.hex_to_rgb(bg), edge),
             "colour_worst_delta": m_worst,
             "colour_detail": m_per,
+            "composited": bool(settings.COMPOSITE_SOURCE),
+            "rejected_as": rejected,
+            "uniform_scale_max_diff": uniform_scale_max_diff(src, model, bg, edge),
+            "artwork_max_diff": artwork_max_diff(src, model, edge, bg),
+            "plate_max_deviation": plate_max_deviation(model, src, edge, bg),
             "vs_exact": compare(exact, model),
         }
     except Exception as exc:
         row["model"] = {
             "error": f"{type(exc).__name__}: {exc}",
+            "rejected_as": getattr(exc, "code", None),
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
         }
     return row
@@ -310,7 +367,8 @@ def main() -> None:
     payload = {
         "generated": time.strftime("%Y-%m-%d %H:%M"),
         "model": settings.IMAGE_MODEL,
-        "target": f"{settings.TARGET_SIZE}x{settings.TARGET_SIZE}",
+        "target": f"per-logo EDGE, {settings.EDGE_MIN}-{settings.EDGE_MAX}",
+        "composite_source": settings.COMPOSITE_SOURCE,
         "quality": settings.IMAGE_QUALITY,
         "total_seconds": round(time.perf_counter() - started, 1),
         "rows": rows,

@@ -5,7 +5,7 @@
     python scripts/run_batch.py --urls urls.txt      # one URL per line
 
 Outputs
-    data/output/<name>_300x300_<id>.png   resized logos
+    data/output/<name>_<edge>x<edge>_<id>.png   squared logos
     data/output/report.csv                import straight into Google Sheets
     data/output/review.html               side-by-side original vs output
 """
@@ -26,9 +26,11 @@ SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 COLUMNS = [
     "no", "source", "original_w", "original_h", "original_format", "aspect_type",
+    "edge", "background", "background_reason", "scale_factor",
     "output_file", "output_w", "output_h", "output_bytes", "renderer_used",
-    "fell_back_to_exact", "phash_distance", "ssim", "mean_pixel_diff", "color_delta",
-    "verdict", "elapsed_ms", "note",
+    "fell_back_in_house", "rejected_as", "composited_source",
+    "phash_distance", "ssim", "mean_pixel_diff", "color_delta",
+    "elapsed_ms", "note",
 ]
 
 
@@ -77,26 +79,35 @@ def main() -> None:
                 "original_h": r["source"]["source_height"],
                 "original_format": r["source"]["source_format"],
                 "aspect_type": r["source"]["aspect_type"],
+                "edge": r["source"]["edge"],
+                "background": r["source"]["background_hex"],
+                "background_reason": r["source"]["background_reason"],
+                "scale_factor": r["source"]["scale_factor"],
                 "output_file": r["output"]["filename"],
                 "output_w": r["output"]["width"], "output_h": r["output"]["height"],
                 "output_bytes": r["output"]["bytes"],
                 "renderer_used": r["renderer_used"],
-                "fell_back_to_exact": r["fell_back_to_exact"],
+                "fell_back_in_house": r["fell_back_in_house"],
+                "rejected_as": r["rejected_as"] or "",
+                "composited_source": r["composited_source"],
                 "phash_distance": f.get("phash_distance", ""),
                 "ssim": f.get("ssim", ""),
                 "mean_pixel_diff": f.get("mean_pixel_diff", ""),
                 "color_delta": f.get("color_delta", ""),
-                "verdict": r["verdict"], "elapsed_ms": r["elapsed_ms"],
+                "elapsed_ms": r["elapsed_ms"],
                 "note": r["note"] or "",
             })
-            if r["verdict"] == "REVIEW":
+            if r["fell_back_in_house"]:
                 review += 1
+            state = r["rejected_as"] or r["renderer_used"]
             cards.append((i, name, thumb(data), thumb(base64.b64decode(r["image_base64"])),
-                          r["source"], r["verdict"], f))
-            print(f"  [{i:>3}/{len(sources)}] {name:<40} {r['verdict']}")
+                          r["source"], state, f))
+            print(f"  [{i:>3}/{len(sources)}] {name:<40} "
+                  f"EDGE {r['source']['edge']}  {state}")
         except Exception as exc:                                   # keep the run going
             rows.append({c: "" for c in COLUMNS} | {"no": i, "source": source,
-                                                    "verdict": "ERROR", "note": str(exc)})
+                                                    "rejected_as": "unreadable",
+                                                    "note": str(exc)})
             print(f"  [{i:>3}/{len(sources)}] {source:<40} ERROR  {exc}")
 
     csv_path = settings.OUTPUT_DIR / "report.csv"
@@ -115,17 +126,17 @@ def main() -> None:
 
 def build_html(cards) -> str:
     body = []
-    for i, name, before, after, meta, verdict, f in cards:
+    for i, name, before, after, meta, state, f in cards:
         metrics = (f"pHash {f.get('phash_distance')} &middot; SSIM {f.get('ssim')} "
-                   f"&middot; diff {f.get('mean_pixel_diff')}") if f else "pixel-exact resize"
+                   f"&middot; diff {f.get('mean_pixel_diff')}") if f else "squared in code"
         body.append(f"""
         <div class="card">
           <div class="hd"><b>#{i} {name}</b>
-            <span class="tag {'bad' if verdict == 'REVIEW' else 'good'}">{verdict}</span></div>
+            <span class="tag">{state}</span></div>
           <div class="pair">
             <figure><img src="{before}"><figcaption>original
               {meta['source_width']}x{meta['source_height']} ({meta['aspect_type']})</figcaption></figure>
-            <figure><img src="{after}"><figcaption>output 300x300</figcaption></figure>
+            <figure><img src="{after}"><figcaption>output {meta['edge']}x{meta['edge']}</figcaption></figure>
           </div>
           <div class="mt">{metrics}</div>
         </div>""")
@@ -142,9 +153,9 @@ def build_html(cards) -> str:
  figcaption{{color:#666;font-size:12px;margin-top:6px}}
  .mt{{color:#666;font-size:12px;margin-top:10px}}
  .tag{{font-size:11px;padding:3px 8px;border-radius:20px}}
- .good{{background:#dcfce7;color:#166534}} .bad{{background:#fee2e2;color:#991b1b}}
+ .tag{{background:#eef0f2;color:#333}}
 </style>
-<h1>Logo resize review &mdash; original vs 300&times;300 output</h1>
+<h1>Logo squaring review &mdash; original vs squared output</h1>
 {''.join(body)}"""
 
 
